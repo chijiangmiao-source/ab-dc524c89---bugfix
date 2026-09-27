@@ -36,6 +36,31 @@ def thirds_model():
     }
 
 
+def three_way_tie_model():
+    """Deep-sea buoy start state with three equal-value actions.
+
+    a1: 1/2 rescued directly, 1/2 to the low relay (rescue rate 1/3)
+        -> exact expectation 1/2 * 1 + 1/2 * 1/3 = 2/3
+    a2, a3: straight to the high relay (rescue rate 2/3) -> 2/3
+    All three actions are truly optimal; the canonical choice must be the
+    lexicographically smallest identifier (a1).
+    """
+    return {
+        "states": ["s0", "low", "high", "r", "l"],
+        "start": "s0",
+        "terminals": {"rescued": ["r"], "lost": ["l"]},
+        "actions": {
+            "s0": {
+                "a1": {"r": "1/2", "low": "1/2"},
+                "a2": {"high": "1"},
+                "a3": {"high": "1"},
+            },
+            "low": {"relay": {"r": "1/3", "l": "2/3"}},
+            "high": {"relay": {"r": "2/3", "l": "1/3"}},
+        },
+    }
+
+
 class RequiredScenariosTest(unittest.TestCase):
     def test_must_rescue(self):
         result = audit(
@@ -114,6 +139,101 @@ class RequiredScenariosTest(unittest.TestCase):
             }
         )
         self.assertEqual(result["max_rescue_probability"], "1")
+
+
+class ThreeWayTieRelayTest(unittest.TestCase):
+    """The three-way equal-value relay model: all three start actions have
+    exact expectation 2/3 and all are truly optimal, so the canonical
+    action is the lexicographically smallest one (a1)."""
+
+    def test_exact_values_and_canonical_action(self):
+        result = audit(three_way_tie_model())
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["start_state"], "s0")
+        self.assertEqual(result["max_rescue_probability"], "2/3")
+        self.assertEqual(result["max_rescue_probability_num"], 2)
+        self.assertEqual(result["max_rescue_probability_den"], 3)
+        self.assertEqual(
+            result["state_values"],
+            {"s0": "2/3", "low": "1/3", "high": "2/3", "r": "1", "l": "0"},
+        )
+        self.assertEqual(result["zero_value_states"], [])
+        self.assertEqual(result["terminal_unreachable_states"], [])
+        self.assertEqual(
+            result["canonical_policy"],
+            {"s0": "a1", "low": "relay", "high": "relay"},
+        )
+
+    def test_full_certificate(self):
+        result = audit(three_way_tie_model())
+        certs = {c["state"]: c for c in result["certificates"]}
+        self.assertEqual(sorted(certs), ["high", "low", "s0"])
+        cert = certs["s0"]
+        self.assertEqual(cert["value"], "2/3")
+        self.assertEqual(cert["value_num"], 2)
+        self.assertEqual(cert["value_den"], 3)
+        self.assertEqual(cert["canonical_action"], "a1")
+        by_action = {a["action"]: a for a in cert["actions"]}
+        self.assertEqual(sorted(by_action), ["a1", "a2", "a3"])
+        for name in ("a1", "a2", "a3"):
+            entry = by_action[name]
+            self.assertEqual(entry["expected_value"], "2/3")
+            self.assertEqual(entry["expected_value_num"], 2)
+            self.assertEqual(entry["expected_value_den"], 3)
+            self.assertTrue(entry["optimal"], name)
+            self.assertEqual(entry["selected"], name == "a1", name)
+            self.assertEqual(
+                entry["reason"],
+                "selected_lexicographically_least_optimal"
+                if name == "a1"
+                else "optimal_but_identifier_not_lexicographically_least",
+            )
+        self.assertEqual(certs["low"]["value"], "1/3")
+        self.assertEqual(certs["low"]["canonical_action"], "relay")
+        self.assertEqual(certs["high"]["value"], "2/3")
+        self.assertEqual(certs["high"]["canonical_action"], "relay")
+
+    def test_certificate_recomputable_from_values_and_expectations(self):
+        # optimal/selected/reason must be recomputable from the state value
+        # and the per-action expectations reported in the same certificate.
+        result = audit(three_way_tie_model())
+        for cert in result["certificates"]:
+            value = cert["value"]
+            tied = sorted(
+                a["action"] for a in cert["actions"]
+                if a["expected_value"] == value
+            )
+            self.assertEqual(cert["canonical_action"], tied[0])
+            for entry in cert["actions"]:
+                if entry["expected_value"] == value:
+                    self.assertTrue(entry["optimal"])
+                    self.assertEqual(
+                        entry["selected"], entry["action"] == tied[0])
+                else:
+                    self.assertFalse(entry["optimal"])
+                    self.assertFalse(entry["selected"])
+                    self.assertEqual(entry["reason"],
+                                     "expected_value_below_state_value")
+
+    def test_entry_order_does_not_change_result(self):
+        # Reordering states, action blocks, actions and transition entries
+        # must not change any conclusion.
+        reference = audit(three_way_tie_model())
+        variant = {
+            "actions": {
+                "high": {"relay": {"l": "1/3", "r": "2/3"}},
+                "s0": {
+                    "a3": {"high": "1"},
+                    "a1": {"low": "1/2", "r": "1/2"},
+                    "a2": {"high": "1"},
+                },
+                "low": {"relay": {"l": "2/3", "r": "1/3"}},
+            },
+            "terminals": {"lost": ["l"], "rescued": ["r"]},
+            "start": "s0",
+            "states": ["l", "r", "high", "low", "s0"],
+        }
+        self.assertEqual(audit(variant), reference)
 
 
 class SolverCorrectnessTest(unittest.TestCase):
@@ -326,7 +446,7 @@ def _random_model(rng):
     states = ctr + ["r", "l"]
     actions = {}
     for s in ctr:
-        n_actions = rng.randint(1, 2)
+        n_actions = rng.randint(1, 3)
         amap = {}
         for k in range(n_actions):
             targets = [t for t in states if rng.random() < 0.7] or ["l"]

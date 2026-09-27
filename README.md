@@ -133,10 +133,10 @@ The `verify` service waits for `web` to be healthy, then runs
    brute-force cross-check that lives only in the tests);
 2. **build checks** — every source file byte-compiles and imports;
 3. **API/HTTP smoke** — posts the must-rescue, `1/3`-`2/3`, equal-value
-   action and closed-loop models and asserts the exact fraction
-   probabilities, the lexicographic canonical action with equal expected
-   values, and the zero rescue probability of the closed loop, plus a
-   locatable `400` failure for a bad probability sum;
+   action, three-way equal-value relay and closed-loop models and asserts
+   the exact fraction probabilities, the lexicographic canonical action
+   with equal expected values, and the zero rescue probability of the
+   closed loop, plus a locatable `400` failure for a bad probability sum;
 
 then prints a report and exits with code `0` (pass) or `1` (fail); the exit
 code is reported both as the process exit status and on the
