@@ -5,10 +5,12 @@ Runs three stages and exits non-zero if any of them fails:
 1. code tests   -- the unit test suite (exact solver, validation, and the
                    brute-force cross-check);
 2. build checks -- every source file byte-compiles and the packages import;
-3. API smoke    -- the four required models are POSTed to a live service:
+3. API smoke    -- the required models are POSTed to a live service:
                    must-rescue, 1/3-2/3 fractions, equal-value actions
-                   (lexicographic tie-break) and the zero-rescue closed
-                   loop, plus a locatable-failure case.
+                   (lexicographic tie-break), the three-way equal-value
+                   relay model (all three actions optimal at exactly 2/3
+                   with the least identifier selected) and the zero-rescue
+                   closed loop, plus a locatable-failure case.
 
 The stage that checks fraction probabilities and the zero-rescue closed
 loop is the HTTP smoke stage.  The process prints a report and then exits
@@ -197,7 +199,58 @@ def stage_http_smoke():
         "policy=%s" % (body.get("canonical_policy"),),
     )
 
-    # 4. closed loop that can never reach any terminal -> zero rescue
+    # 4. three-way equal-value relay model -> every action optimal at
+    #    exactly 2/3, canonical action is the least identifier
+    status, body = post_audit(
+        {
+            "states": ["s0", "low", "hi", "r", "l"],
+            "start": "s0",
+            "terminals": {"rescued": ["r"], "lost": ["l"]},
+            "actions": {
+                "s0": {
+                    "a1": {"r": "1/2", "low": "1/2"},
+                    "a2": {"hi": "1"},
+                    "a3": {"hi": "1"},
+                },
+                "low": {"relay": {"r": "1/3", "l": "2/3"}},
+                "hi": {"relay": {"r": "2/3", "l": "1/3"}},
+            },
+        }
+    )
+    certs = {c.get("state"): c for c in body.get("certificates", [])}
+    s0_cert = certs.get("s0", {})
+    relay_acts = {a.get("action"): a for a in s0_cert.get("actions", [])}
+    ok &= check(
+        "three-way equal-value relay: all optimal at 2/3, least selected",
+        status == 200
+        and body.get("max_rescue_probability") == "2/3"
+        and body.get("max_rescue_probability_num") == 2
+        and body.get("max_rescue_probability_den") == 3
+        and body.get("state_values", {}).get("s0") == "2/3"
+        and body.get("state_values", {}).get("low") == "1/3"
+        and body.get("state_values", {}).get("hi") == "2/3"
+        and body.get("canonical_policy", {}).get("s0") == "a1"
+        and s0_cert.get("value") == "2/3"
+        and s0_cert.get("canonical_action") == "a1"
+        and sorted(relay_acts) == ["a1", "a2", "a3"]
+        and all(
+            relay_acts[name].get("expected_value") == "2/3"
+            and relay_acts[name].get("expected_value_num") == 2
+            and relay_acts[name].get("expected_value_den") == 3
+            and relay_acts[name].get("optimal") is True
+            and relay_acts[name].get("selected") is (name == "a1")
+            for name in ("a1", "a2", "a3")
+        )
+        and relay_acts["a1"].get("reason")
+        == "selected_lexicographically_least_optimal"
+        and relay_acts["a2"].get("reason")
+        == "optimal_but_identifier_not_lexicographically_least"
+        and relay_acts["a3"].get("reason")
+        == "optimal_but_identifier_not_lexicographically_least",
+        "policy=%s acts=%s" % (body.get("canonical_policy"), relay_acts),
+    )
+
+    # 5. closed loop that can never reach any terminal -> zero rescue
     status, body = post_audit(
         {
             "states": ["s0", "k1", "k2", "r", "l"],
@@ -223,7 +276,7 @@ def stage_http_smoke():
            body.get("terminal_unreachable_states")),
     )
 
-    # 5. invalid model (probabilities do not sum to one) -> locatable 400
+    # 6. invalid model (probabilities do not sum to one) -> locatable 400
     status, body = post_audit(
         {
             "states": ["s0", "r", "l"],

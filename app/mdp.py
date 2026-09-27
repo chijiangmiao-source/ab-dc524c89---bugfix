@@ -540,9 +540,6 @@ def solve(model):
         s: sorted(a for a, ev in expected[s].items() if ev == values[s])
         for s in nonterm
     }
-    continuation_candidates = _nonregressive_continuations(
-        model, bellman_equal, values
-    )
 
     # Truly optimal actions: a Bellman-equal action a at a positive-value
     # state s is optimal iff rescued is still reachable when s is committed
@@ -552,14 +549,13 @@ def solve(model):
     # action is optimal.
     optimal_actions = {}
     for s in nonterm:
-        candidates = continuation_candidates[s]
+        candidates = bellman_equal[s]
         if values[s] == 0:
             optimal_actions[s] = candidates
             continue
         good = []
         for a in candidates:
-            if _rescued_reachable_committing(
-                    model, continuation_candidates, s, a):
+            if _rescued_reachable_committing(model, bellman_equal, s, a):
                 good.append(a)
         optimal_actions[s] = good
 
@@ -577,21 +573,6 @@ def solve(model):
         terminal_unreachable_states=terminal_unreachable_states,
         max_rescue_probability=values[model.start],
     )
-
-
-def _nonregressive_continuations(model, bellman_equal, values):
-    candidates = {}
-    for state, actions in bellman_equal.items():
-        if len(actions) < 3:
-            candidates[state] = actions
-            continue
-        nonregressive = []
-        for action in actions:
-            targets = model.actions[state][action]
-            if all(values[target] >= values[state] for target in targets):
-                nonregressive.append(action)
-        candidates[state] = nonregressive or actions
-    return candidates
 
 
 def _rescued_reachable_committing(model, bellman_equal, state, action):

@@ -36,6 +36,80 @@ def thirds_model():
     }
 
 
+def three_way_relay_model():
+    """Deep-sea buoy: three actions at the start state, all with exact
+    expected value 2/3.  a1 rescues directly with probability 1/2 and
+    falls back to a 1/3-success relay with probability 1/2; a2 and a3
+    both commit to a 2/3-success relay."""
+    return {
+        "states": ["s0", "low", "hi", "r", "l"],
+        "start": "s0",
+        "terminals": {"rescued": ["r"], "lost": ["l"]},
+        "actions": {
+            "s0": {
+                "a1": {"r": "1/2", "low": "1/2"},
+                "a2": {"hi": "1"},
+                "a3": {"hi": "1"},
+            },
+            "low": {"relay": {"r": "1/3", "l": "2/3"}},
+            "hi": {"relay": {"r": "2/3", "l": "1/3"}},
+        },
+    }
+
+
+def closed_loop_model():
+    return {
+        "states": ["s0", "k1", "k2", "r", "l"],
+        "start": "s0",
+        "terminals": {"rescued": ["r"], "lost": ["l"]},
+        "actions": {
+            "s0": {"drift": {"k1": "1"}},
+            "k1": {"spin": {"k2": "1"}},
+            "k2": {"spin": {"k1": "1"}},
+        },
+    }
+
+
+def assert_certificates_recomputable(testcase, result):
+    """Recompute every certificate decision from the state values and the
+    per-action expectations, and check it against the emitted certificate:
+    optimal/selected flags, the canonical action and every exclusion reason
+    must follow from ``state_values`` and ``expected_value`` alone."""
+    testcase.assertEqual(result["status"], "ok")
+    values = result["state_values"]
+    for cert in result["certificates"]:
+        value = Fraction(values[cert["state"]])
+        testcase.assertEqual(Fraction(cert["value"]), value)
+        testcase.assertEqual(cert["value_num"], value.numerator)
+        testcase.assertEqual(cert["value_den"], value.denominator)
+        entries = cert["actions"]
+        testcase.assertTrue(entries)
+        optimal = [e["action"] for e in entries if e["optimal"]]
+        testcase.assertTrue(optimal, "state %s has no optimal action"
+                            % cert["state"])
+        least = min(optimal)
+        testcase.assertEqual(cert["canonical_action"], least)
+        testcase.assertEqual(result["canonical_policy"][cert["state"]], least)
+        for entry in entries:
+            ev = Fraction(entry["expected_value"])
+            testcase.assertEqual(entry["expected_value_num"], ev.numerator)
+            testcase.assertEqual(entry["expected_value_den"], ev.denominator)
+            testcase.assertEqual(entry["selected"], entry["action"] == least)
+            if entry["optimal"]:
+                testcase.assertEqual(ev, value)
+                reason = (
+                    "selected_lexicographically_least_optimal"
+                    if entry["action"] == least
+                    else "optimal_but_identifier_not_lexicographically_least"
+                )
+            elif ev < value:
+                reason = "expected_value_below_state_value"
+            else:
+                testcase.assertEqual(ev, value)
+                reason = "equal_value_but_no_optimal_continuation"
+            testcase.assertEqual(entry["reason"], reason)
+
+
 class RequiredScenariosTest(unittest.TestCase):
     def test_must_rescue(self):
         result = audit(
@@ -87,22 +161,68 @@ class RequiredScenariosTest(unittest.TestCase):
             self.assertEqual(entry["selected"], entry["action"] == "alpha")
 
     def test_closed_loop_zero_rescue(self):
-        payload = {
-            "states": ["s0", "k1", "k2", "r", "l"],
-            "start": "s0",
-            "terminals": {"rescued": ["r"], "lost": ["l"]},
-            "actions": {
-                "s0": {"drift": {"k1": "1"}},
-                "k1": {"spin": {"k2": "1"}},
-                "k2": {"spin": {"k1": "1"}},
-            },
-        }
-        result = audit(payload)
+        result = audit(closed_loop_model())
         self.assertEqual(result["max_rescue_probability"], "0")
         self.assertEqual(result["zero_value_states"], ["k1", "k2", "s0"])
         self.assertEqual(result["terminal_unreachable_states"], ["k1", "k2", "s0"])
         values = {c["state"]: c["value"] for c in result["certificates"]}
         self.assertEqual(values, {"k1": "0", "k2": "0", "s0": "0"})
+
+    def test_three_way_equal_value_relay(self):
+        # a1: 1/2 rescued directly + 1/2 low relay (1/3) -> 2/3 exactly;
+        # a2, a3: hi relay (2/3) -> 2/3 exactly.  All three actions are
+        # truly optimal and the least identifier must be selected.
+        result = audit(three_way_relay_model())
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["max_rescue_probability"], "2/3")
+        self.assertEqual(result["max_rescue_probability_num"], 2)
+        self.assertEqual(result["max_rescue_probability_den"], 3)
+        self.assertEqual(result["state_values"]["s0"], "2/3")
+        self.assertEqual(result["state_values"]["low"], "1/3")
+        self.assertEqual(result["state_values"]["hi"], "2/3")
+        self.assertEqual(result["canonical_policy"]["s0"], "a1")
+        cert = {c["state"]: c for c in result["certificates"]}["s0"]
+        self.assertEqual(cert["value"], "2/3")
+        self.assertEqual(cert["canonical_action"], "a1")
+        by_action = {a["action"]: a for a in cert["actions"]}
+        self.assertEqual(sorted(by_action), ["a1", "a2", "a3"])
+        for name, entry in by_action.items():
+            self.assertEqual(entry["expected_value"], "2/3")
+            self.assertEqual(entry["expected_value_num"], 2)
+            self.assertEqual(entry["expected_value_den"], 3)
+            self.assertTrue(entry["optimal"])
+            self.assertEqual(entry["selected"], name == "a1")
+        self.assertEqual(by_action["a1"]["reason"],
+                         "selected_lexicographically_least_optimal")
+        self.assertEqual(by_action["a2"]["reason"],
+                         "optimal_but_identifier_not_lexicographically_least")
+        self.assertEqual(by_action["a3"]["reason"],
+                         "optimal_but_identifier_not_lexicographically_least")
+
+    def test_input_order_does_not_change_result(self):
+        # Shuffling the entry order of states, action blocks, actions and
+        # transition items must not change any conclusion.
+        rng = random.Random(20260927)
+        for model in (three_way_relay_model(), closed_loop_model()):
+            base = audit(model)
+            for _ in range(25):
+                payload = json.loads(json.dumps(model))
+                states = payload["states"]
+                payload["states"] = rng.sample(states, len(states))
+                blocks = list(payload["actions"].items())
+                rng.shuffle(blocks)
+                new_actions = {}
+                for state, amap in blocks:
+                    action_items = list(amap.items())
+                    rng.shuffle(action_items)
+                    new_amap = {}
+                    for action, dist in action_items:
+                        dist_items = list(dist.items())
+                        rng.shuffle(dist_items)
+                        new_amap[action] = dict(dist_items)
+                    new_actions[state] = new_amap
+                payload["actions"] = new_actions
+                self.assertEqual(audit(payload), base)
 
     def test_start_terminal(self):
         result = audit(
@@ -192,6 +312,46 @@ class SolverCorrectnessTest(unittest.TestCase):
         }
         result = audit(payload)
         self.assertEqual(result["max_rescue_probability"], "1")
+
+    def test_certificates_recomputable_from_values_and_expectations(self):
+        # Every optimal/selected flag and every exclusion reason must be
+        # recomputable from the state values and per-action expectations.
+        payloads = [
+            three_way_relay_model(),
+            closed_loop_model(),
+            thirds_model(),
+            {  # must-rescue
+                "states": ["s0", "r", "l"],
+                "start": "s0",
+                "terminals": {"rescued": ["r"], "lost": ["l"]},
+                "actions": {"s0": {"go": {"r": "1"}}},
+            },
+            {  # truly suboptimal action
+                "states": ["s0", "r", "l"],
+                "start": "s0",
+                "terminals": {"rescued": ["r"], "lost": ["l"]},
+                "actions": {
+                    "s0": {
+                        "good": {"r": "2/3", "l": "1/3"},
+                        "bad": {"r": "1/3", "l": "2/3"},
+                    }
+                },
+            },
+            {  # Bellman-equal action without an optimal continuation
+                "states": ["s1", "s2", "r", "l"],
+                "start": "s1",
+                "terminals": {"rescued": ["r"], "lost": ["l"]},
+                "actions": {
+                    "s1": {"a1": {"s2": "1"}},
+                    "s2": {
+                        "a2": {"s1": "1"},
+                        "b2": {"r": "1/2", "l": "1/2"},
+                    },
+                },
+            },
+        ]
+        for payload in payloads:
+            assert_certificates_recomputable(self, audit(payload))
 
 
 class ValidationTest(unittest.TestCase):
@@ -326,7 +486,7 @@ def _random_model(rng):
     states = ctr + ["r", "l"]
     actions = {}
     for s in ctr:
-        n_actions = rng.randint(1, 2)
+        n_actions = rng.randint(1, 3)
         amap = {}
         for k in range(n_actions):
             targets = [t for t in states if rng.random() < 0.7] or ["l"]
